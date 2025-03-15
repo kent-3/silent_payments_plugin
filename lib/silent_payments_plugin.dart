@@ -1,36 +1,200 @@
-
-import 'dart:async';
+// import 'dart:async';
+// import 'dart:isolate';
+import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
-import 'dart:isolate';
+import 'package:ffi/ffi.dart';
+import 'package:convert/convert.dart';
 
 import 'silent_payments_plugin_bindings_generated.dart';
 
-/// A very short-lived native function.
-///
-/// For very short-lived functions, it is fine to call them on the main isolate.
-/// They will block the Dart execution while running the native function, so
-/// only do this for native functions which are guaranteed to be short-lived.
-int sum(int a, int b) => _bindings.sum(a, b);
+class Receiver {
+  final String bScan;
+  final String BSpend;
+  final bool isTestnet;
+  final List<int> labels;
+  final int labelsLen;
 
-/// A longer lived native function, which occupies the thread calling it.
+  Receiver(this.bScan, this.BSpend, this.isTestnet, this.labels)
+    : labelsLen = labels.length;
+
+  Map<String, dynamic> toJson() {
+    return {
+      'bScan': bScan,
+      'BSpend': BSpend,
+      'isTestnet': isTestnet,
+      'labels': labels,
+      'labelsLen': labelsLen,
+    };
+  }
+
+  static Receiver fromJson(Map<String, dynamic> json) {
+    return Receiver(
+      json['bScan'],
+      json['BSpend'],
+      json['isTestnet'],
+      List<int>.from(json['labels']),
+    );
+  }
+}
+
+Pointer<OutputData> createOutputDataStruct(String outputToCheck) {
+  final outputBytes = bytesFromHexString(outputToCheck);
+  final Pointer<Uint8> outputToCheckPtr = calloc<Uint8>(outputBytes.length);
+  final outputToCheckList = outputToCheckPtr.asTypedList(outputBytes.length);
+  outputToCheckList.setAll(0, outputBytes);
+
+  final result = calloc<OutputData>();
+  result.ref.pubkey_bytes = outputToCheckPtr;
+  return result;
+}
+
+void freeOutputDataStruct(Pointer<OutputData> voutDataPtr) {
+  calloc.free(voutDataPtr.ref.pubkey_bytes);
+  calloc.free(voutDataPtr);
+}
+
+Pointer<ReceiverData> createReceiverDataStruct(
+  String bScan,
+  String BSpend,
+  bool isTestnet,
+  List<int> labels,
+  int labelsLen,
+) {
+  final Pointer<Uint8> bScanPtr = calloc<Uint8>(bScan.length);
+  final bScanList = bScanPtr.asTypedList(bScan.length);
+  bScanList.setAll(0, bytesFromHexString(bScan));
+
+  final Pointer<Uint8> bSpendPtr = calloc<Uint8>(BSpend.length);
+  final BSpendList = bSpendPtr.asTypedList(BSpend.length);
+  BSpendList.setAll(0, bytesFromHexString(BSpend));
+
+  final Pointer<Uint32> labelsPtr = calloc<Uint32>(labels.length);
+  final labelsList = labelsPtr.asTypedList(labels.length);
+  labelsList.setAll(0, labels);
+
+  final result = calloc<ReceiverData>();
+  result.ref
+    ..b_scan_bytes = bScanPtr
+    ..B_spend_bytes = bSpendPtr
+    ..is_testnet = isTestnet
+    ..labels = labelsPtr
+    ..labels_len = labelsLen;
+  return result;
+}
+
+void freeReceiverDataStruct(Pointer<ReceiverData> receiverDataPtr) {
+  calloc.free(receiverDataPtr.ref.b_scan_bytes);
+  calloc.free(receiverDataPtr.ref.B_spend_bytes);
+  calloc.free(receiverDataPtr.ref.labels);
+  calloc.free(receiverDataPtr);
+}
+
+Pointer<Int8> callApiScanOutputs(
+  List<dynamic> outputsToCheck,
+  String tweakDataForRecipient,
+  Receiver receiver,
+) {
+  final pointers = calloc<Pointer<OutputData>>(outputsToCheck.length);
+  for (int i = 0; i < outputsToCheck.length; i++) {
+    pointers[i] = createOutputDataStruct(outputsToCheck[i][0].toString());
+  }
+
+  final pointersReceiver = createReceiverDataStruct(
+    receiver.bScan,
+    receiver.BSpend,
+    receiver.isTestnet,
+    receiver.labels,
+    receiver.labelsLen,
+  );
+
+  final tweakBytes = bytesFromHexString(tweakDataForRecipient);
+  final tweakPtr = calloc<Uint8>(tweakBytes.length);
+  final tweakList = tweakPtr.asTypedList(tweakBytes.length);
+  tweakList.setAll(0, tweakBytes);
+
+  final paramData = calloc<ParamData>();
+  paramData.ref
+    ..outputs_data = pointers
+    ..outputs_data_len = outputsToCheck.length
+    ..tweak_bytes = tweakPtr
+    ..receiver_data = pointersReceiver;
+
+  // Call the Rust function with ParamData
+  final result = _bindings.api_scan_outputs(paramData);
+
+  // Cleanup
+  for (int i = 0; i < outputsToCheck.length; i++) {
+    freeOutputDataStruct(pointers[i]);
+  }
+  freeReceiverDataStruct(pointersReceiver);
+  calloc.free(pointers);
+  calloc.free(tweakPtr);
+  calloc.free(paramData);
+
+  return result;
+}
+
+typedef FreePointerFunc = Int8 Function(Pointer<Int8>);
+typedef FreePointer = int Function(Pointer<Int8>);
+
+final freePointer = _dylib.lookupFunction<FreePointerFunc, FreePointer>(
+  'free_pointer',
+);
+
+Map<String, dynamic> interpretBytesVec(Pointer<Int8> pointer) {
+  final jsonString = pointer.cast<Utf8>().toDartString();
+
+  final result = jsonDecode(jsonString) as Map<String, dynamic>;
+
+  freePointer(pointer);
+
+  return result;
+}
+
+Map<String, dynamic> scanOutputs(
+  List<dynamic> outputsToCheck,
+  String tweakDataForRecipient,
+  Receiver receiver,
+) {
+  return interpretBytesVec(
+    callApiScanOutputs(outputsToCheck, tweakDataForRecipient, receiver),
+  );
+}
+
+/// Converts a hexadecimal string [data] into a List of integers representing bytes.
 ///
-/// Do not call these kind of native functions in the main isolate. They will
-/// block Dart execution. This will cause dropped frames in Flutter applications.
-/// Instead, call these native functions on a separate isolate.
+/// The function removes the '0x' prefix, strips leading zeros, and decodes the
+/// resulting hexadecimal string into bytes. Optionally, it pads zero if the
+/// string length is odd and the [paddingZero] parameter is set to true.
 ///
-/// Modify this to suit your own use case. Example use cases:
+/// Parameters:
+/// - [data]: The hexadecimal string to be converted.
+/// - [paddingZero]: Whether to pad a zero to the string if its length is odd
+///   (default is false).
 ///
-/// 1. Reuse a single isolate for various different kinds of requests.
-/// 2. Use multiple helper isolates for parallel execution.
-Future<int> sumAsync(int a, int b) async {
-  final SendPort helperIsolateSendPort = await _helperIsolateSendPort;
-  final int requestId = _nextSumRequestId++;
-  final _SumRequest request = _SumRequest(requestId, a, b);
-  final Completer<int> completer = Completer<int>();
-  _sumRequests[requestId] = completer;
-  helperIsolateSendPort.send(request);
-  return completer.future;
+/// Returns:
+/// - A List of integers representing bytes converted from the hexadecimal string.
+///
+/// Throws:
+/// - [ArgumentError] if the input is not a valid hexadecimal string.
+List<int> bytesFromHexString(String data, {bool paddingZero = false}) {
+  try {
+    // Remove '0x' prefix if present
+    String hexString =
+        data.toLowerCase().startsWith("0x") ? data.substring(2) : data;
+
+    if (hexString.isEmpty) return [];
+
+    // Pad with zero if the length is odd and paddingZero is enabled
+    if (paddingZero && hexString.length.isOdd) {
+      hexString = "0$hexString";
+    }
+
+    return hex.decode(hexString); // Convert hex string to byte list
+  } catch (e) {
+    throw ArgumentError("invalid hex bytes");
+  }
 }
 
 const String _libName = 'silent_payments_plugin';
@@ -50,82 +214,6 @@ final DynamicLibrary _dylib = () {
 }();
 
 /// The bindings to the native functions in [_dylib].
-final SilentPaymentsPluginBindings _bindings = SilentPaymentsPluginBindings(_dylib);
-
-
-/// A request to compute `sum`.
-///
-/// Typically sent from one isolate to another.
-class _SumRequest {
-  final int id;
-  final int a;
-  final int b;
-
-  const _SumRequest(this.id, this.a, this.b);
-}
-
-/// A response with the result of `sum`.
-///
-/// Typically sent from one isolate to another.
-class _SumResponse {
-  final int id;
-  final int result;
-
-  const _SumResponse(this.id, this.result);
-}
-
-/// Counter to identify [_SumRequest]s and [_SumResponse]s.
-int _nextSumRequestId = 0;
-
-/// Mapping from [_SumRequest] `id`s to the completers corresponding to the correct future of the pending request.
-final Map<int, Completer<int>> _sumRequests = <int, Completer<int>>{};
-
-/// The SendPort belonging to the helper isolate.
-Future<SendPort> _helperIsolateSendPort = () async {
-  // The helper isolate is going to send us back a SendPort, which we want to
-  // wait for.
-  final Completer<SendPort> completer = Completer<SendPort>();
-
-  // Receive port on the main isolate to receive messages from the helper.
-  // We receive two types of messages:
-  // 1. A port to send messages on.
-  // 2. Responses to requests we sent.
-  final ReceivePort receivePort = ReceivePort()
-    ..listen((dynamic data) {
-      if (data is SendPort) {
-        // The helper isolate sent us the port on which we can sent it requests.
-        completer.complete(data);
-        return;
-      }
-      if (data is _SumResponse) {
-        // The helper isolate sent us a response to a request we sent.
-        final Completer<int> completer = _sumRequests[data.id]!;
-        _sumRequests.remove(data.id);
-        completer.complete(data.result);
-        return;
-      }
-      throw UnsupportedError('Unsupported message type: ${data.runtimeType}');
-    });
-
-  // Start the helper isolate.
-  await Isolate.spawn((SendPort sendPort) async {
-    final ReceivePort helperReceivePort = ReceivePort()
-      ..listen((dynamic data) {
-        // On the helper isolate listen to requests and respond to them.
-        if (data is _SumRequest) {
-          final int result = _bindings.sum_long_running(data.a, data.b);
-          final _SumResponse response = _SumResponse(data.id, result);
-          sendPort.send(response);
-          return;
-        }
-        throw UnsupportedError('Unsupported message type: ${data.runtimeType}');
-      });
-
-    // Send the port to the main isolate on which we can receive requests.
-    sendPort.send(helperReceivePort.sendPort);
-  }, receivePort.sendPort);
-
-  // Wait until the helper isolate has sent us back the SendPort on which we
-  // can start sending requests.
-  return completer.future;
-}();
+final SilentPaymentsPluginBindings _bindings = SilentPaymentsPluginBindings(
+  _dylib,
+);

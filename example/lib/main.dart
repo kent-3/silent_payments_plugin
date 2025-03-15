@@ -1,5 +1,5 @@
-import 'package:flutter/material.dart';
 import 'dart:async';
+import 'package:flutter/material.dart';
 
 import 'package:silent_payments_plugin/silent_payments_plugin.dart'
     as silent_payments_plugin;
@@ -16,15 +16,27 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
-  late int sumResult;
   // late Future<int> sumAsyncResult;
+  late Map<String, dynamic> result;
 
   @override
   void initState() {
     super.initState();
-    // sumResult = silent_payments_plugin.sum(1, 2);
-    // sumAsyncResult = silent_payments_plugin.sumAsync(3, 4);
-    sumResult = 3;
+
+    result = silent_payments_plugin.interpretBytesVec(
+      silent_payments_plugin.callApiScanOutputs(
+        [
+          ["545ff3ecec27fbf43790d639a7a71ea0ff72a3dcce11aea17aeb63eca4188379"],
+        ],
+        "03a952f2ec5ea0a8bd7d5022c499ab7947058e3dd471434775b08f10d5d4fd1ab9",
+        silent_payments_plugin.Receiver(
+          "f402c47811fa7ff8d7f879de7be8d2f1b7cc411c0542535731fb43095b90a3b6",
+          "022fdc3f6726e23bfce017ab731c09e13d97cde4613bba309e5f2c507798764bca",
+          false,
+          [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], // TODO: figure out what these do
+        ),
+      ),
+    );
   }
 
   @override
@@ -46,11 +58,7 @@ class _MyAppState extends State<MyApp> {
                   textAlign: TextAlign.center,
                 ),
                 spacerSmall,
-                Text(
-                  'sum(1, 2) = $sumResult',
-                  style: textStyle,
-                  textAlign: TextAlign.center,
-                ),
+                Text('$result', style: textStyle, textAlign: TextAlign.center),
                 spacerSmall,
                 // FutureBuilder<int>(
                 //   future: sumAsyncResult,
